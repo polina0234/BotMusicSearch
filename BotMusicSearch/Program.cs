@@ -3,15 +3,12 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using System.Linq;
-using System.Globalization;
 using BotMusicSearch.Models;
 
 class Program
 {
     static async Task Main(string[] args)
     {
-        string rapidApiKey = "949809a65bmsh10f285348c494d5p172789jsn928be670203a";
-        string rapidApiHost = "youtube-music6.p.rapidapi.com";
         string youtubeApiKey = "AIzaSyD4YZMgz6w_IUsCsRmWEw4KNFnapqy1j5w";
 
         Console.Write("Введи назву піснi або виконавця: ");
@@ -20,53 +17,103 @@ class Program
         using HttpClient client = new HttpClient();
 
         // ========== ЗАПИТ №1: ПОШУК ==========
-        client.DefaultRequestHeaders.Clear();
-        client.DefaultRequestHeaders.Add("x-rapidapi-key", rapidApiKey);
-        client.DefaultRequestHeaders.Add("x-rapidapi-host", rapidApiHost);
-
-        string searchUrl = $"https://youtube-music6.p.rapidapi.com/ytmusic/?query={Uri.EscapeDataString(query)}&limit=15";
-
+        string searchQuery = $"{query} official music video";
+        string searchUrl = $"https://www.googleapis.com/youtube/v3/search?part=snippet&maxResults=30&q={Uri.EscapeDataString(searchQuery)}&type=video&key={youtubeApiKey}";
         var searchResponse = await client.GetAsync(searchUrl);
+
         if (!searchResponse.IsSuccessStatusCode)
         {
             Console.WriteLine($"Помилка пошуку: {searchResponse.StatusCode}");
             Console.ReadKey();
             return;
         }
+
         string searchJson = await searchResponse.Content.ReadAsStringAsync();
+        var searchData = JsonConvert.DeserializeObject<Search>(searchJson);
 
-        var searchResults = JsonConvert.DeserializeObject<Class1[]>(searchJson);
-        var songs = searchResults.Where(x => x.resultType == "song").ToList();
-        var sortedSongs = songs.OrderByDescending(x => ParseViews(x.views)).ToList();
+        // ========== ОБРОБКА ДАНИХ: ФІЛЬТРАЦІЯ (тільки пісні) ==========
+        var filteredSongs = searchData.items
+            .Where(item =>
+            {
+                string title = item.snippet.title.ToLower();
+                string channelTitle = item.snippet.channelTitle.ToLower();
 
-        Console.WriteLine($"\nЗнайдено {sortedSongs.Count} пiсень:\n");
+                // Канали, які часто видають музику
+                bool isMusicChannel = channelTitle.Contains("topic") ||
+                                      channelTitle.Contains("vevo") ||
+                                      channelTitle.Contains("official") ||
+                                      channelTitle.Contains("music");
+
+                // Ключові слова в назві, що вказують на пісню
+                bool isSong = title.Contains("official") ||
+                              title.Contains("music video") ||
+                              title.Contains("audio") ||
+                              title.Contains("lyrics") ||
+                              title.Contains("official video") ||
+                              title.Contains("track") ||
+                              title.Contains("song") ||
+                              title.Contains("клип") ||
+                              title.Contains("пісня") ||
+                              title.Contains("альбом");
+
+                // Виключаємо явно не музичне
+                bool isNotSong = title.Contains("live") ||
+                                 title.Contains("реакция") ||
+                                 title.Contains("обзор") ||
+                                 title.Contains("топ") ||
+                                 title.Contains("fact") ||
+                                 title.Contains("наука") ||
+                                 title.Contains("эксперимент") ||
+                                 title.Contains("фокус") ||
+                                 title.Contains("проводка") ||
+                                 title.Contains("аккумулятор");
+
+                return (isMusicChannel || isSong) && !isNotSong;
+            })
+            .Select(item => new
+            {
+                videoId = item.id.videoId,
+                title = item.snippet.title,
+                channelTitle = item.snippet.channelTitle,
+                publishedAt = item.snippet.publishedAt
+            })
+            .ToList();
+
+        // ========== ОБРОБКА ДАНИХ: СОРТУВАННЯ (за датою, новіші перші) ==========
+        var sortedSongs = filteredSongs.OrderByDescending(s => s.publishedAt).ToList();
+
+        Console.WriteLine($"\nЗнайдено пiсень: {sortedSongs.Count}\n");
         for (int i = 0; i < Math.Min(15, sortedSongs.Count); i++)
         {
             var song = sortedSongs[i];
-            string artists = string.Join(", ", song.artists?.Select(a => a.name) ?? new[] { "Невідомий" });
-            Console.WriteLine($"{i + 1}. {artists} - {song.title}");
-            Console.WriteLine($"   Переглядiв: {song.views}");
+            Console.WriteLine($"{i + 1}. {song.channelTitle} - {song.title}");
             Console.WriteLine($"   https://youtu.be/{song.videoId}\n");
         }
 
+        if (sortedSongs.Count == 0)
+        {
+            Console.WriteLine("Не знайдено пiсень.");
+            Console.ReadKey();
+            return;
+        }
+
         // ========== ВИБІР ВІДЕО ==========
-        Console.Write("\nВиберiть номер вiдео для детальної iнформацiї: ");
+        Console.Write("\nВиберiть номер пiснi для детальної iнформацiї: ");
         int selected = int.Parse(Console.ReadLine()) - 1;
         string selectedVideoId = sortedSongs[selected].videoId;
 
         // ========== ЗАПИТ №2: ДЕТАЛЬНА ІНФОРМАЦІЯ ==========
-        client.DefaultRequestHeaders.Clear();
         string videoUrl = $"https://www.googleapis.com/youtube/v3/videos?part=snippet,contentDetails,statistics&id={selectedVideoId}&key={youtubeApiKey}";
-
         var videoResponse = await client.GetAsync(videoUrl);
+
         if (!videoResponse.IsSuccessStatusCode)
         {
             Console.WriteLine($"Помилка отримання деталей: {videoResponse.StatusCode}");
             Console.ReadKey();
             return;
         }
-        string videoJson = await videoResponse.Content.ReadAsStringAsync();
 
+        string videoJson = await videoResponse.Content.ReadAsStringAsync();
         var videoData = JsonConvert.DeserializeObject<VideoDetailsResponse>(videoJson);
 
         Console.WriteLine("\nДЕТАЛЬНА IНФОРМАЦIЯ:\n");
@@ -87,6 +134,7 @@ class Program
             Console.WriteLine($"   Канал: {snippet.channelTitle}");
             Console.WriteLine($"   Дата: {snippet.publishedAt:yyyy-MM-dd}");
             Console.WriteLine($"   Тривалiсть: {duration}");
+            Console.WriteLine($"   Переглядiв: {video.statistics?.viewCount ?? "Немає даних"}");
             Console.WriteLine($"   https://www.youtube.com/watch?v={selectedVideoId}");
         }
         else
@@ -94,41 +142,35 @@ class Program
             Console.WriteLine("   Не вдалося отримати деталi.");
         }
 
-        // ========== ЗАПИТ №3: СХОЖІ ТРЕКИ (ЗАПИТУЄМО КОРИСТУВАЧА) ==========
+        // ========== ЗАПИТ №3: СХОЖІ ТРЕКИ ==========
         Console.Write("\nБажаєте знайти схожi треки? (так/нi): ");
         string answer = Console.ReadLine()?.ToLower();
 
         if (answer == "так" || answer == "yes" || answer == "т" || answer == "y")
         {
-            string artistName = sortedSongs[selected].artists?[0]?.name ?? "";
-            string songTitle = sortedSongs[selected].title ?? "";
-            string searchQuery = $"{artistName} {songTitle} official music video";
+            string artistName = sortedSongs[selected].channelTitle;
+            string songTitle = sortedSongs[selected].title;
+            string similarQuery = $"{artistName} {songTitle} official music video";
 
-            string relatedUrl = $"https://www.googleapis.com/youtube/v3/search?part=snippet&q={Uri.EscapeDataString(searchQuery)}&type=video&maxResults=8&key={youtubeApiKey}";
-
+            string relatedUrl = $"https://www.googleapis.com/youtube/v3/search?part=snippet&q={Uri.EscapeDataString(similarQuery)}&type=video&maxResults=8&key={youtubeApiKey}";
             var relatedResponse = await client.GetAsync(relatedUrl);
+
             if (!relatedResponse.IsSuccessStatusCode)
             {
                 Console.WriteLine($"Помилка отримання схожих трекiв: {relatedResponse.StatusCode}");
                 Console.ReadKey();
                 return;
             }
-            string relatedJson = await relatedResponse.Content.ReadAsStringAsync();
 
+            string relatedJson = await relatedResponse.Content.ReadAsStringAsync();
             var relatedData = JsonConvert.DeserializeObject<RelatedSearchResponse>(relatedJson);
 
             Console.WriteLine("\nСХОЖI ТРЕКИ:\n");
             if (relatedData.items != null && relatedData.items.Length > 0)
             {
-                var relatedVideos = relatedData.items
-                    .Where(x => x.id?.videoId != null)
-                    .OrderByDescending(x => x.snippet.publishedAt)
-                    .Take(8)
-                    .ToList();
-
-                for (int i = 0; i < relatedVideos.Count; i++)
+                for (int i = 0; i < Math.Min(8, relatedData.items.Length); i++)
                 {
-                    var video = relatedVideos[i];
+                    var video = relatedData.items[i];
                     Console.WriteLine($"{i + 1}. {video.snippet.title}");
                     Console.WriteLine($"   Канал: {video.snippet.channelTitle}");
                     Console.WriteLine($"   https://www.youtube.com/watch?v={video.id.videoId}\n");
@@ -145,19 +187,5 @@ class Program
         }
 
         Console.ReadKey();
-    }
-
-    static double ParseViews(string views)
-    {
-        if (string.IsNullOrEmpty(views)) return 0;
-        try
-        {
-            if (views.EndsWith("M"))
-                return double.Parse(views.Replace("M", ""), CultureInfo.InvariantCulture) * 1000000;
-            if (views.EndsWith("K"))
-                return double.Parse(views.Replace("K", ""), CultureInfo.InvariantCulture) * 1000;
-            return double.Parse(views, CultureInfo.InvariantCulture);
-        }
-        catch { return 0; }
     }
 }
